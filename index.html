@@ -58,6 +58,9 @@
   .thumb.has{border-style:solid;border-color:transparent}
   .thumb span{position:absolute;top:4px;inset-inline-start:4px;background:rgba(0,0,0,.55);color:#fff;border-radius:6px;font-size:11px;padding:0 5px}
   .thumbs.drag .thumb{border-color:var(--accent)}
+  .imginfo{font-size:13px;margin-top:6px;min-height:0}
+  .imginfo:empty{display:none}
+  .imginfo.ok{color:var(--ok)} .imginfo.warn{color:var(--warn)}
 
   /* bottom bar */
   .bar{position:fixed;inset-inline:0;bottom:0;background:rgba(255,255,255,.97);border-top:1px solid var(--line);
@@ -89,10 +92,11 @@
     <div class="head"><h2>الشرح</h2><span class="count" id="cnt-main"></span><button type="button" class="clr" data-clear="main">مسح</button><button type="button" data-paste="main">لصق</button></div>
     <textarea id="txt-main" dir="auto" aria-label="الشرح"></textarea>
     <div class="pick-row">
-      <button type="button" class="pick" id="pickAll">📷 اختار الـ٤ صور</button>
+      <button type="button" class="pick" id="pickAll">📷 اختار الصور</button>
       <button type="button" class="clr" id="clearImgs" hidden>مسح الصور</button>
     </div>
     <div class="thumbs" id="thumbs"></div>
+    <div class="imginfo" id="imgInfo"></div>
   </section>
 
   <section class="box">
@@ -21987,7 +21991,7 @@ function isRTL(s) {
   if (!l) return true;
   const first = s.match(/[A-Za-zؠ-يٮ-ۓ]/);
   if (first && /[A-Za-z]/.test(first[0])) return l / (a + l) < 0.15;
-  return true;
+  return l / (a + l) <= 0.75;   // a short Arabic label in front of a mostly-English line stays left-to-right
 }
 const hasAr = s => /[\u0600-\u06FF]/.test(s);
 
@@ -22063,8 +22067,11 @@ function unwrapBold(t) { // "*Answer: B*" -> "Answer: B"
 }
 
 const WHOLE_BOLD = /^((?:\p{Extended_Pictographic}|\uFE0F|\u200D|\s)*)(\*\*|\*|__)([^*_].*?)\2\s*:?$/u;
+const FIGURE = /^(?:figure|fig\.?|image|img|picture|diagram|صورة|الصورة|صوره|شكل)\s*(?:رقم\s*|no\.?\s*|#)?(\d{1,2})(?![\d.]\d)\s*(?:[—–\-:.)]|$)/i;
+// "…: First image above" only says where the picture sat in WhatsApp -> drop it from the caption
+const FIG_META = /\s*[:\-—–,]?\s*(?:the\s+)?(?:(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th)?)\s+)?(?:image|picture|figure|photo)\s+(?:above|below)\.?\s*$/i;
 const VISUAL_RE = /visual|images?|figures?|diagrams?|illustrations?|صور|الصور|رسوم/i;
-const CHAPTER_PREFIX = /^(?:chapter|ch\.?|الفصل|فصل|شابتر|الشابتر)\s*(\d{1,3})\s*[:\-–—.]*\s*/i;
+const CHAPTER_PREFIX = /^(?:chapter|ch\.?|الفصل|فصل|شابتر|الشابتر)\s*(\d{1,3})\s*(\(\s*[A-Za-z]\s*\)|[A-Za-z](?![A-Za-z]))?\s*[:\-–—.]*\s*/i;
 
 function isUpperish(s) {
   const lat = stripMd(s).match(/[A-Za-z]/g) || [];
@@ -22086,6 +22093,16 @@ function parseBlocks(text, mode) {
     let m;
 
     if ((m = tu.match(IMG_MARK))) { blocks.push({ type: "image", n: +m[1], caption: (m[2] || "").trim() }); continue; }
+
+    // "*Figure 2 — EFI Decision Flowchart: Second image above*" -> image 2 goes here, the line becomes its caption
+    const tf = tu.replace(/^[\p{Extended_Pictographic}️\s]+/u, "");
+    if (tf.length <= 220 && (m = tf.match(FIGURE))) {
+      const below = /\b(?:image|picture|figure|photo)\s+below\b|الصورة\s+(?:تحت|بالأسفل)/i.test(tf);
+      blocks.push({ type: "image", n: +m[1], caption: "", figure: tf.replace(FIG_META, "").trim(), imageAfter: below });
+      continue;
+    }
+    // "> 📌 note" -> highlighted note box
+    if ((m = t.match(/^>\s?(.*)$/))) { blocks.push({ type: "quote", text: m[1].trim() }); continue; }
 
     if (isTabRow(lines[i]) && i + 1 < lines.length && isTabRow(lines[i + 1])) {   // tab-separated table (WhatsApp / Meta AI)
       const rows = [];
@@ -22126,17 +22143,25 @@ function parseBlocks(text, mode) {
         inVisual = VISUAL_RE.test(m[2]);
         continue;
       }
+      // "★ MIND MAP — ENDOMETRIOSIS AND ART" right after --- in capitals -> main section heading
+      if (prev?.type === "hr" && tu.length <= 90 && isUpperish(tu) && !/[.:]$/.test(tu) && !/^\*/.test(t)) {
+        blocks.push({ type: "heading", lvl: 1, text: tu });
+        inVisual = VISUAL_RE.test(tu);
+        continue;
+      }
+      // "1.1 Definition and Modern Reframing" -> sub-section heading
+      if ((m = t.match(/^\d{1,2}\.\d{1,2}\.?\s+(.{2,120})$/)) && !/\.$/.test(m[1])) { blocks.push({ type: "heading", lvl: 2, text: t }); continue; }
       // inside the visual section: "*1. Mind Map — ...*" -> slot for image 1
       if (inVisual && (m = tu.match(/^(\d)[.)]\s+(.+)$/))) { blocks.push({ type: "image", n: +m[1], caption: "", title: tu }); continue; }
       // "A. Definitions & Principles — ..." -> sub-section heading
       if ((m = t.match(/^([A-Z])[.)]\s+(.{2,150})$/)) && !/\.$/.test(m[2])) { blocks.push({ type: "heading", lvl: 2, text: t }); continue; }
       // "Essay 1: ..." -> small heading
-      if (/^(essay|case|scenario)\s*\d+\s*[:\-–—]/i.test(tu) && tu.length <= 200) { blocks.push({ type: "heading", lvl: 3, text: tu }); continue; }
+      if (/^(essay(\s+question)?|case|scenario|(osce\s+)?station)\s*\d+\s*([:\-–—]|$)/i.test(tu) && tu.length <= 200) { blocks.push({ type: "heading", lvl: 3, text: tu }); continue; }
     }
 
     // whole-line bold -> heading (short lines only)
     const wb = t.match(WHOLE_BOLD);
-    if (wb && !wb[3].includes("*") && stripMd(wb[3]).length <= 110) { blocks.push({ type: "heading", md: 0, text: wb[1] + wb[3].replace(/:$/, "") }); continue; }
+    if (wb && !wb[3].includes("*") && !wb[3].includes("|") && stripMd(wb[3]).length <= 110) { blocks.push({ type: "heading", md: 0, text: wb[1] + wb[3].replace(/:$/, "") }); continue; }
 
     if ((m = raw.match(BULLET))) { blocks.push({ type: "bullet", level: Math.min(2, Math.floor(m[1].length / 2)), text: m[2] }); continue; }
     if ((m = raw.match(NUM))) { blocks.push({ type: "num", level: Math.min(2, Math.floor(m[1].length / 2)), label: m[2] + ".", text: m[3] }); continue; }
@@ -22170,10 +22195,10 @@ function P(text, opts = {}, runExtra = {}) {
   return new D.Paragraph({ bidirectional: isRTL(stripMd(text)) || undefined, children: runs(text, runExtra), ...opts });
 }
 
-function imageParas(img, n) {
+function imageParas(img, n, keepNext = false) {
   const ratio = Math.min(1, MAX_IMG_W / img.w, MAX_IMG_H / img.h);
   const out = [new D.Paragraph({
-    alignment: D.AlignmentType.CENTER, keepNext: !!img.caption, spacing: { before: 160, after: img.caption ? 60 : 200 },
+    alignment: D.AlignmentType.CENTER, keepNext: keepNext || !!img.caption, spacing: { before: 160, after: img.caption || keepNext ? 60 : 200 },
     children: [new D.ImageRun({ type: img.type, data: img.data, transformation: { width: Math.round(img.w * ratio), height: Math.round(img.h * ratio) },
       altText: { title: `Figure ${n}`, description: img.caption || `Figure ${n}`, name: `Figure ${n}` } })],
   })];
@@ -22237,11 +22262,11 @@ function buildDocx(opts) {
   const used = new Set();
   const marked = new Set(blocks.filter(b => b.type === "image").map(b => b.n));
   const pending = mode === "main" ? imgs.map((im, i) => (im && !marked.has(i + 1) ? i + 1 : null)).filter(Boolean) : [];
-  const putImage = n => {
+  const putImage = (n, keepNext) => {
     const im = imgs[n - 1];
     if (!im || used.has(n)) return [];
     used.add(n); report.images++;
-    return imageParas(im, n);
+    return imageParas(im, n, keepNext);
   };
 
   if (placement === "start") pending.splice(0).forEach(n => children.push(...putImage(n)));
@@ -22267,13 +22292,25 @@ function buildDocx(opts) {
       case "note":
         children.push(P(b.text, { alignment: D.AlignmentType.CENTER, spacing: { before: 120 } }, { italics: true, color: "7F7F7F", size: 20 }));
         break;
-      case "image":
-        if (b.title) { report.headings++; children.push(P(b.title, { heading: HL[3] })); }
-        if (mode === "main" && imgs[b.n - 1]) {
-          if (b.caption && !imgs[b.n - 1].caption) imgs[b.n - 1] = { ...imgs[b.n - 1], caption: b.caption };
-          children.push(...putImage(b.n));
-        } else report.missingMarkers.push(b.n);
+      case "quote":
+        children.push(P(b.text, {
+          spacing: { before: 120, after: 160 }, indent: { start: 240, end: 240 },
+          shading: { type: D.ShadingType.CLEAR, fill: "FFF7E0", color: "auto" },
+          border: { left: { style: D.BorderStyle.SINGLE, size: 18, color: "E0A800", space: 6 } },
+        }));
         break;
+      case "image": {
+        if (b.title) { report.headings++; children.push(P(b.title, { heading: HL[3] })); }
+        const has = mode === "main" && imgs[b.n - 1] && !used.has(b.n);
+        const cap = b.figure ? P(b.figure, { alignment: D.AlignmentType.CENTER, keepNext: !!b.imageAfter, spacing: { before: 40, after: 200 } }, { italics: true, color: "595959", size: 20 }) : null;
+        if (cap && (b.imageAfter || !has)) children.push(cap);          // caption above image (or alone if no image)
+        if (has) {
+          if (b.caption && !imgs[b.n - 1].caption) imgs[b.n - 1] = { ...imgs[b.n - 1], caption: b.caption };
+          children.push(...putImage(b.n, !!(cap && !b.imageAfter)));
+        } else report.missingMarkers.push(b.n);
+        if (cap && has && !b.imageAfter) children.push(cap);            // usual: image, then its caption
+        break;
+      }
       case "heading":
         report.headings++;
         children.push(P(b.text, { heading: HL[b.level] }));
@@ -22393,10 +22430,21 @@ function firstLineBlock(text) {
   return b && (b.type === "heading" || (b.type === "para" && stripMd(b.text).length <= 120)) ? b : null;
 }
 function detectTitle(text) { const b = firstLineBlock(text); return b ? titleText(b.text) : ""; }
-function detectChapter(text) { const b = firstLineBlock(text); const m = b && cleanTitle(b.text).match(CHAPTER_PREFIX); return m ? +m[1] : null; }
+// -> { n: 16, part: "(A)" } or null
+function detectChapter(text) {
+  const b = firstLineBlock(text); const m = b && cleanTitle(b.text).match(CHAPTER_PREFIX);
+  return m ? { n: +m[1], part: m[2] ? "(" + m[2].replace(/[()\s]/g, "").toUpperCase() + ")" : "" } : null;
+}
+
+// How many images the Main text asks for (highest image number it mentions).
+function expectedImages(text) {
+  const ns = parseBlocks(text || "", "main").filter(b => b.type === "image").map(b => b.n);
+  return ns.length ? Math.max(...ns) : 0;
+}
 
 function fileName(mode, chapterNo) {
-  return `Chapter ${String(chapterNo).padStart(2, "0")} - ${MODE_LABEL[mode]}.docx`;
+  // "7" -> "07", "16(A)" stays "16(A)"
+  return `Chapter ${String(chapterNo).replace(/^\d+/, d => d.padStart(2, "0"))} - ${MODE_LABEL[mode]}.docx`;
 }
 
 </script>
@@ -22405,7 +22453,11 @@ function fileName(mode, chapterNo) {
 /* ===== UI ===== */
 const $ = s => document.querySelector(s);
 const MODES = ["main", "rev", "mcq"];
-const images = [null, null, null, null];
+const images = [];          // any number of images (image N = "Figure N" in the text)
+const MAX_IMGS = 12;
+let expected = 0;           // how many images the Main text mentions
+let thumbsReady = false;
+let chPart = "", mainTitle = "";   // chapter part like "(A)", and the title read from the Main text
 let replaceSlot = -1;   // >=0 when replacing one image, -1 when picking all
 let downloaded = false;
 
@@ -22420,8 +22472,8 @@ function status(msg, cls = "") { const el = $("#status"); el.textContent = msg; 
 const chNo = $("#chNo");
 chNo.value = store.get("chNo") || "1";
 const setCh = n => { chNo.value = Math.max(1, n | 0); store.set("chNo", chNo.value); };
-$("#minus").onclick = () => setCh(+chNo.value - 1);
-$("#plus").onclick = () => setCh(+chNo.value + 1);
+$("#minus").onclick = () => { setCh(+chNo.value - 1); chPart = ""; $("#title").textContent = mainTitle; };
+$("#plus").onclick = () => { setCh(+chNo.value + 1); chPart = ""; $("#title").textContent = mainTitle; };
 chNo.addEventListener("input", () => store.set("chNo", chNo.value));
 
 /* ---- texts ---- */
@@ -22429,9 +22481,11 @@ function refresh(m) {
   const ta = $("#txt-" + m), v = ta.value.trim();
   ta.classList.toggle("rtl", isRTL(v.slice(0, 400)));
   const c = $("#cnt-" + m); c.textContent = v ? `${v.split(/\s+/).length} كلمة` : ""; c.classList.remove("done");
-  if (m === "main") $("#title").textContent = detectTitle(ta.value);
-  const n = detectChapter(ta.value);   // "CHAPTER 11: ..." in any box -> chapter number 11
-  if (n && String(n) !== chNo.value) setCh(n);
+  if (m === "main") { mainTitle = detectTitle(ta.value); expected = expectedImages(ta.value); if (thumbsReady) renderThumbs(false); }
+  const ch = detectChapter(ta.value);   // "CHAPTER 16(A): ..." in any box -> chapter 16, part (A)
+  if (ch) { if (String(ch.n) !== chNo.value) setCh(ch.n); chPart = ch.part; }
+  else if (MODES.every(k => !$("#txt-" + k).value.trim())) chPart = "";
+  $("#title").textContent = (chPart ? chPart + " " : "") + mainTitle;
 }
 for (const m of MODES) {
   const ta = $("#txt-" + m);
@@ -22452,8 +22506,8 @@ document.addEventListener("click", async e => {
 
 /* ---- images ---- */
 const thumbs = $("#thumbs");
-for (let i = 0; i < 4; i++) thumbs.insertAdjacentHTML("beforeend", `<button type="button" class="thumb" data-i="${i}" aria-label="صورة ${i + 1}">${i + 1}</button>`);
 const thumbEl = i => thumbs.children[i];
+let saveTimer;
 
 function loadImg(url) { return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; }); }
 async function prepImage(file) {
@@ -22484,14 +22538,23 @@ const idb = {
     try { const db = await this.open(); return await new Promise((res, rej) => { const r = db.transaction("kv").objectStore("kv").get(k); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); } catch { return undefined; }
   },
 };
-let saveTimer;
-function renderThumbs() {
-  images.forEach((img, i) => {
-    const t = thumbEl(i);
-    if (img) { t.style.backgroundImage = `url("${img.url}")`; t.classList.add("has"); t.innerHTML = `<span>${i + 1}</span>`; }
-    else { t.style.backgroundImage = ""; t.classList.remove("has"); t.textContent = i + 1; }
-  });
-  $("#clearImgs").hidden = !images.some(Boolean);
+const picked = () => images.filter(Boolean).length;
+function renderThumbs(save = true) {
+  while (images.length && !images[images.length - 1]) images.pop();
+  const slots = Math.min(MAX_IMGS, Math.max(expected, images.length));
+  thumbs.innerHTML = Array.from({ length: slots }, (_, i) => {
+    const img = images[i];
+    return img
+      ? `<button type="button" class="thumb has" data-i="${i}" aria-label="صورة ${i + 1}" style="background-image:url('${img.url}')"><span>${i + 1}</span></button>`
+      : `<button type="button" class="thumb" data-i="${i}" aria-label="صورة ${i + 1}">${i + 1}</button>`;
+  }).join("");
+  const n = picked();
+  $("#pickAll").textContent = expected ? `📷 اختار الـ${expected} صور` : "📷 اختار الصور";
+  const info = $("#imgInfo");
+  info.textContent = expected ? (n === expected ? `${n} من ${expected} صور ✓` : `${n} من ${expected} صور`) : (n ? `${n} صور` : "");
+  info.className = "imginfo " + (expected && n !== expected ? "warn" : "ok");
+  $("#clearImgs").hidden = !n;
+  if (!save) return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => idb.set("images", images.map(im => im && { data: im.data, type: im.type, w: im.w, h: im.h })), 200);
 }
@@ -22499,12 +22562,13 @@ async function setImage(i, file) {
   images[i] = await prepImage(file);
   renderThumbs();
 }
-function clearImages() { images.fill(null); renderThumbs(); }
+function clearImages() { images.length = 0; renderThumbs(); }
 idb.get("images").then(saved => {
   if (!Array.isArray(saved) || images.some(Boolean)) return;
-  saved.forEach((s, i) => { if (s && i < 4) images[i] = { ...s, url: URL.createObjectURL(new Blob([s.data], { type: s.type === "png" ? "image/png" : "image/jpeg" })), caption: "" }; });
+  saved.forEach((s, i) => { if (s && i < MAX_IMGS) images[i] = { ...s, url: URL.createObjectURL(new Blob([s.data], { type: s.type === "png" ? "image/png" : "image/jpeg" })), caption: "" }; });
   renderThumbs();
 });
+thumbsReady = true; renderThumbs(false);
 const byName = fs => fs.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 const isImg = f => f.type.startsWith("image/") || /\.(jpe?g|png|webp|heic|heif)$/i.test(f.name);
 
@@ -22514,11 +22578,11 @@ async function setAll(files) {
   if (!files.length) return;
   clearImages();
   let bad = 0;
-  for (let i = 0; i < Math.min(4, files.length); i++) { try { await setImage(i, files[i]); } catch { bad++; } }
-  const n = images.filter(Boolean).length;
+  for (let i = 0; i < Math.min(MAX_IMGS, files.length); i++) { try { await setImage(i, files[i]); } catch { bad++; } }
+  const n = picked();
   if (bad) status(`${bad} صورة مش مقروءة، اختارها تاني`, "err");
-  else if (files.length > 4) status(`اخترت ${files.length}، اتحط أول ٤`, "warn");
-  else status(`${n} صور ✓`, n === 4 ? "ok" : "warn");
+  else if (expected && n !== expected) status(`اخترت ${n} صور والشرح فيه ${expected}`, "warn");
+  else status(`${n} صور ✓`, "ok");
 }
 
 $("#pickAll").onclick = () => { replaceSlot = -1; $("#filePick").click(); };
@@ -22547,8 +22611,9 @@ document.addEventListener("paste", async e => {
   const files = [...(e.clipboardData?.files || [])].filter(isImg);
   if (!files.length) return;
   e.preventDefault();
-  const i = images.findIndex(x => !x);
-  if (files.length === 1 && i >= 0) { await setImage(i, files[0]); status(`صورة ${i + 1} ✓`, "ok"); }
+  let i = images.findIndex(x => !x);
+  if (i < 0) i = images.length;
+  if (files.length === 1 && i < MAX_IMGS) { await setImage(i, files[0]); status(`صورة ${i + 1} ✓`, "ok"); }
   else await setAll(files);
 });
 
@@ -22560,7 +22625,7 @@ function saveBlob(blob, name) {
 const wait = ms => new Promise(r => setTimeout(r, ms));
 
 $("#dlAll").onclick = async () => {
-  const no = chNo.value || "1";
+  const no = (chNo.value || "1") + chPart;
   const title = detectTitle($("#txt-main").value);
   const todo = MODES.filter(m => $("#txt-" + m).value.trim());
   if (!todo.length) return status("الصق الكلام الأول", "warn");
@@ -22577,7 +22642,7 @@ $("#dlAll").onclick = async () => {
       if (m === "mcq" && report.questions && report.answers !== report.questions) warns.push(`${report.questions} سؤال و${report.answers} إجابة`);
       await wait(400);
     }
-    if (todo.includes("main") && images.filter(Boolean).length < 4) warns.push(`${images.filter(Boolean).length}/4 صور`);
+    if (todo.includes("main") && expected && picked() !== expected) warns.push(`${picked()}/${expected} صور`);
     const missing = MODES.filter(m => !todo.includes(m)).length;
     if (missing) warns.push(`${missing} مربع فاضي`);
     status(warns.length ? `اتنزّل ${todo.length} ملف · ⚠ ${warns.join(" · ")}` : `اتنزّل ${todo.length} ملفات ✓`, warns.length ? "warn" : "ok");
@@ -22601,7 +22666,7 @@ function offerUndo(msg) {
 $("#undo").onclick = () => {
   if (!snapshot) return;
   MODES.forEach(m => setText(m, snapshot.texts[m]));
-  snapshot.images.forEach((im, i) => { images[i] = im; }); renderThumbs();
+  images.length = 0; images.push(...snapshot.images); renderThumbs();
   setCh(+snapshot.ch);
   snapshot = null; status("رجعت ✓", "ok");
 };
