@@ -61,6 +61,14 @@
   .imginfo{font-size:13px;margin-top:6px;min-height:0}
   .imginfo:empty{display:none}
   .imginfo.ok{color:var(--ok)} .imginfo.warn{color:var(--warn)}
+  .places:empty{display:none}
+  .places{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+  .places .hint{font-size:12.5px;color:var(--muted);margin:2px 0}
+  .place{display:flex;align-items:center;gap:8px}
+  .place i{flex:none;width:44px;height:44px;border-radius:7px;background:#eef0f3 center/cover no-repeat;position:relative;font-style:normal}
+  .place i b{position:absolute;top:2px;inset-inline-start:2px;background:rgba(0,0,0,.6);color:#fff;border-radius:5px;font-size:10px;padding:0 4px}
+  .place select{flex:1;min-width:0;font:inherit;font-size:14px;padding:9px 8px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);direction:ltr}
+  .place select.unset{border-color:#f0c36d;background:#fffaf0}
 
   /* bottom bar */
   .bar{position:fixed;inset-inline:0;bottom:0;background:rgba(255,255,255,.97);border-top:1px solid var(--line);
@@ -96,6 +104,7 @@
       <button type="button" class="clr" data-clrimgs="main" hidden>مسح الصور</button>
     </div>
     <div class="thumbs" data-thumbs="main"></div>
+    <div class="places" data-places="main"></div>
     <div class="imginfo" data-info="main"></div>
   </section>
 
@@ -107,6 +116,7 @@
       <button type="button" class="clr" data-clrimgs="rev" hidden>مسح الصور</button>
     </div>
     <div class="thumbs" data-thumbs="rev"></div>
+    <div class="places" data-places="rev"></div>
     <div class="imginfo" data-info="rev"></div>
   </section>
 
@@ -22193,6 +22203,8 @@ function parseBlocks(text, mode) {
   // A single line after the final --- ("Chapter 11 Complete ...") is a closing note
   const last = out[out.length - 1];
   if (last && ["heading", "para"].includes(last.type) && !last.lvl && out[out.length - 2]?.type === "hr") { last.type = "note"; last.text = unwrapBold(last.text); }
+  // stable id per heading, so a picture can be pinned "under heading #k"
+  out.filter(b => b.type === "heading").forEach((b, k) => { b.hid = k; });
   return out;
 }
 
@@ -22269,7 +22281,14 @@ function buildDocx(opts) {
   const imgs = images.map(x => x || null);
   const used = new Set();
   const marked = new Set(blocks.filter(b => b.type === "image").map(b => b.n));
-  const pending = imgs.length ? imgs.map((im, i) => (im && !marked.has(i + 1) ? i + 1 : null)).filter(Boolean) : [];
+  // places: { imageNumber: headingId } chosen by the user when the text has no Figure line for that image
+  const places = opts.places || {};
+  const pinned = {};
+  for (const [n, hid] of Object.entries(places)) if (hid !== "" && hid != null && imgs[n - 1] && !marked.has(+n)) (pinned[hid] ??= []).push(+n);
+  const isPinned = n => Object.values(pinned).some(a => a.includes(n));
+  const pending = imgs.length ? imgs.map((im, i) => (im && !marked.has(i + 1) && !isPinned(i + 1) ? i + 1 : null)).filter(Boolean) : [];
+  let after = [];   // pinned images waiting for the end of their heading's section
+  const flushAfter = () => { after.sort((a, b) => a - b).forEach(n => children.push(...putImage(n))); after = []; };
   const putImage = (n, keepNext) => {
     const im = imgs[n - 1];
     if (!im || used.has(n)) return [];
@@ -22288,6 +22307,7 @@ function buildDocx(opts) {
   let lastQ = null;
 
   for (const b of blocks) {
+    if (b.type === "heading" || b.type === "hr") flushAfter();
     if (placement === "sections" && b.type === "heading" && b.level === topLevel) {
       if (sectionsSeen > 0 && pending.length) children.push(...putImage(pending.shift()));
       sectionsSeen++;
@@ -22322,6 +22342,7 @@ function buildDocx(opts) {
       case "heading":
         report.headings++;
         children.push(P(b.text, { heading: HL[b.level] }));
+        if (pinned[b.hid]) after.push(...pinned[b.hid]);
         break;
       case "bullet":
         report.bullets++;
@@ -22380,6 +22401,7 @@ function buildDocx(opts) {
         children.push(P(b.text, mode === "mcq" && lastQ ? { indent: { start: 360 } } : {}));
     }
   }
+  flushAfter();
   pending.forEach(n => children.push(...putImage(n)));
 
   if (answerKey && answers.length) {
@@ -22444,6 +22466,13 @@ function detectChapter(text) {
   return m ? { n: +m[1], part: m[2] ? "(" + m[2].replace(/[()\s]/g, "").toUpperCase() + ")" : "" } : null;
 }
 
+// Headings a picture can be pinned under: [{ hid, level, text }] (the "CHAPTER …" line is left out)
+function listHeadings(text, mode = "main") {
+  return parseBlocks(text || "", mode)
+    .filter(b => b.type === "heading" && !CHAPTER_PREFIX.test(cleanTitle(b.text)))
+    .map(b => ({ hid: b.hid, level: b.level, text: cleanTitle(b.text) }));
+}
+
 // How many images the Main text asks for (highest image number it mentions).
 function expectedImages(text, mode = "main") {
   const ns = parseBlocks(text || "", mode).filter(b => b.type === "image").map(b => b.n);
@@ -22465,7 +22494,11 @@ const MODES = ["main", "rev", "mcq"];
 const IMG_MODES = ["main", "rev"];
 const NAMES = { main: "الشرح", rev: "المراجعة", mcq: "الأسئلة" };
 const MAX_IMGS = 12;
-const gal = Object.fromEntries(IMG_MODES.map(m => [m, { list: [], expected: 0 }]));
+const gal = Object.fromEntries(IMG_MODES.map(m => [m, { list: [], expected: 0, heads: [], places: {} }]));
+// image N -> heading id it goes under (for pictures that have no "Figure N" line in the text)
+for (const m of IMG_MODES) { try { gal[m].places = JSON.parse(localStorage.getItem("c2w:places-" + m) || "{}"); } catch {} }
+const savePlaces = m => { try { localStorage.setItem("c2w:places-" + m, JSON.stringify(gal[m].places)); } catch {} };
+const esc = t => t.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 let thumbsReady = false;
 let chPart = "", mainTitle = "";   // chapter part like "(A)", and the title read from the Main text
 let pickTarget = { m: "main", slot: -1 };   // which set the file picker fills (slot -1 = all)
@@ -22493,7 +22526,7 @@ function refresh(m) {
   ta.classList.toggle("rtl", isRTL(v.slice(0, 400)));
   const c = $("#cnt-" + m); c.textContent = v ? `${v.split(/\s+/).length} كلمة` : ""; c.classList.remove("done");
   if (m === "main") mainTitle = detectTitle(ta.value);
-  if (gal[m]) { gal[m].expected = expectedImages(ta.value, m); if (thumbsReady) renderThumbs(m, false); }
+  if (gal[m]) { gal[m].expected = expectedImages(ta.value, m); gal[m].heads = listHeadings(ta.value, m); if (thumbsReady) renderThumbs(m, false); }
   const ch = detectChapter(ta.value);   // "CHAPTER 16(A): ..." in any box -> chapter 16, part (A)
   if (ch) { if (String(ch.n) !== chNo.value) setCh(ch.n); chPart = ch.part; }
   else if (MODES.every(k => !$("#txt-" + k).value.trim())) chPart = "";
@@ -22562,17 +22595,34 @@ function renderThumbs(m, save = true) {
       : `<button type="button" class="thumb" data-i="${i}" aria-label="صورة ${i + 1}">${i + 1}</button>`;
   }).join("");
   const n = picked(m), e = g.expected;
+  // pictures beyond the "Figure N" lines (or all of them when the text has none) need a heading picked
+  const free = list.map((im, i) => (im && i + 1 > e ? i + 1 : 0)).filter(Boolean);
+  if (g.heads.length) { const hids = new Set(g.heads.map(h => String(h.hid))); for (const k of Object.keys(g.places)) if (!hids.has(String(g.places[k]))) delete g.places[k]; }
+  const opts = g.heads.map(h => `<option value="${h.hid}">${["", "", "— ", "—— "][h.level] || ""}${esc(h.text.slice(0, 70))}</option>`).join("");
+  const box = el("data-places", m);
+  box.innerHTML = free.length && g.heads.length
+    ? `<div class="hint">الصور دي مالهاش علامة في الكلام. اختار كل صورة تحت أنهي عنوان (زي ما هي في الواتس):</div>` +
+      free.map(k => `<label class="place"><i style="background-image:url('${list[k - 1].url}')"><b>${k}</b></i><select data-place="${k}" class="${g.places[k] == null ? "unset" : ""}" aria-label="مكان صورة ${k}"><option value="">— اختار مكان صورة ${k} —</option>${opts}</select></label>`).join("")
+    : "";
+  free.forEach(k => { const sel = box.querySelector(`[data-place="${k}"]`); if (sel && g.places[k] != null) sel.value = String(g.places[k]); });
+  const unset = g.heads.length ? free.filter(k => g.places[k] == null).length : 0;
   el("data-pick", m).textContent = e ? `📷 اختار الـ${e} صور` : "📷 اختار الصور";
   const info = el("data-info", m);
-  info.textContent = e ? (n === e ? `${n} من ${e} صور ✓` : `${n} من ${e} صور`) : (n ? `${n} صور` : "");
-  info.className = "imginfo " + (e && n !== e ? "warn" : "ok");
+  info.textContent = e ? (n === e ? `${n} من ${e} صور ✓` : `${n} من ${e} صور`) : (n ? (unset ? `${n} صور · ${unset} لسه مالهاش مكان` : `${n} صور ✓`) : "");
+  info.className = "imginfo " + ((e && n !== e) || unset ? "warn" : "ok");
   el("data-clrimgs", m).hidden = !n;
   if (!save) return;
   clearTimeout(saveTimers[m]);
   saveTimers[m] = setTimeout(() => idb.set(idbKey(m), list.map(im => im && { data: im.data, type: im.type, w: im.w, h: im.h })), 200);
 }
 async function setImage(m, i, file) { gal[m].list[i] = await prepImage(file); renderThumbs(m); }
-function clearImages(m) { gal[m].list.length = 0; renderThumbs(m); }
+function clearImages(m) { gal[m].list.length = 0; gal[m].places = {}; savePlaces(m); renderThumbs(m); }
+document.addEventListener("change", e => {
+  const sel = e.target.closest?.("[data-place]"); if (!sel) return;
+  const m = sel.closest("[data-places]").dataset.places, k = sel.dataset.place;
+  if (sel.value === "") delete gal[m].places[k]; else gal[m].places[k] = +sel.value;
+  savePlaces(m); renderThumbs(m, false);
+});
 for (const m of IMG_MODES) idb.get(idbKey(m)).then(saved => {
   if (!Array.isArray(saved) || gal[m].list.some(Boolean)) return;
   saved.forEach((s, i) => { if (s && i < MAX_IMGS) gal[m].list[i] = { ...s, url: URL.createObjectURL(new Blob([s.data], { type: s.type === "png" ? "image/png" : "image/jpeg" })), caption: "" }; });
@@ -22656,7 +22706,7 @@ $("#dlAll").onclick = async () => {
     for (const m of todo) {
       const { doc, report } = buildDocx({
         mode: m, text: $("#txt-" + m).value, chapterNo: no, chapterTitle: title, addTitle: true,
-        dropTitleLine: m === "main", images: gal[m]?.list || [], placement: "sections",
+        dropTitleLine: m === "main", images: gal[m]?.list || [], places: gal[m]?.places || {}, placement: "sections",
       });
       saveBlob(await D.Packer.toBlob(doc), fileName(m, no));
       const c = $("#cnt-" + m); c.textContent = "✓ اتنزّل"; c.classList.add("done");
@@ -22664,6 +22714,7 @@ $("#dlAll").onclick = async () => {
       await wait(400);
     }
     for (const m of IMG_MODES) if (todo.includes(m) && gal[m].expected && picked(m) !== gal[m].expected) warns.push(`${NAMES[m]} ${picked(m)}/${gal[m].expected} صور`);
+    for (const m of IMG_MODES) { const g = gal[m]; const u = g.list.filter((im, i) => im && i + 1 > g.expected && g.places[i + 1] == null).length; if (todo.includes(m) && u && g.heads.length) warns.push(`${u} صور في ${NAMES[m]} من غير مكان`); }
     const missing = MODES.filter(m => !todo.includes(m)).length;
     if (missing) warns.push(`${missing} مربع فاضي`);
     status(warns.length ? `اتنزّل ${todo.length} ملف · ⚠ ${warns.join(" · ")}` : `اتنزّل ${todo.length} ملفات ✓`, warns.length ? "warn" : "ok");
@@ -22677,7 +22728,7 @@ $("#dlAll").onclick = async () => {
 let snapshot = null, undoTimer;
 const setText = (m, v) => { const ta = $("#txt-" + m); ta.value = v; ta.dispatchEvent(new Event("input")); };
 function takeSnapshot() {
-  snapshot = { texts: Object.fromEntries(MODES.map(m => [m, $("#txt-" + m).value])), images: Object.fromEntries(IMG_MODES.map(m => [m, gal[m].list.slice()])), ch: chNo.value };
+  snapshot = { texts: Object.fromEntries(MODES.map(m => [m, $("#txt-" + m).value])), images: Object.fromEntries(IMG_MODES.map(m => [m, gal[m].list.slice()])), places: Object.fromEntries(IMG_MODES.map(m => [m, { ...gal[m].places }])), ch: chNo.value };
 }
 function offerUndo(msg) {
   status(msg, "warn");
@@ -22687,7 +22738,7 @@ function offerUndo(msg) {
 $("#undo").onclick = () => {
   if (!snapshot) return;
   MODES.forEach(m => setText(m, snapshot.texts[m]));
-  IMG_MODES.forEach(m => { gal[m].list = snapshot.images[m].slice(); renderThumbs(m); });
+  IMG_MODES.forEach(m => { gal[m].list = snapshot.images[m].slice(); gal[m].places = { ...snapshot.places[m] }; savePlaces(m); renderThumbs(m); });
   setCh(+snapshot.ch);
   snapshot = null; status("رجعت ✓", "ok");
 };
