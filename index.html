@@ -22175,13 +22175,15 @@ function parseBlocks(text, mode) {
     blocks.push({ type: "para", text: t });
   }
 
-  const out = blocks.filter(b => b.type !== "blank");
+  // drop blanks, and treat "---" twice in a row as one line
+  const out = blocks.filter(b => b.type !== "blank").filter((b, k, arr) => !(b.type === "hr" && arr[k - 1]?.type === "hr"));
   // Heading levels: explicit (sections) > markdown # > bold lines
   const structured = out.some(b => b.lvl);
-  const mdLevels = out.filter(b => b.type === "heading" && b.md).map(b => b.md);
+  // (the "# CHAPTER 16(D) — …" line becomes the title, so it doesn't count: "## 1. SUMMARY" is then the top level)
+  const mdLevels = out.filter(b => b.type === "heading" && b.md && !CHAPTER_PREFIX.test(cleanTitle(b.text))).map(b => b.md);
   const minMd = mdLevels.length ? Math.min(...mdLevels) : 0;
   for (const b of out) if (b.type === "heading") {
-    b.level = b.lvl || (b.md ? Math.min(3, b.md - minMd + 1) : (minMd || structured ? 3 : 2));
+    b.level = b.lvl || (b.md ? Math.max(1, Math.min(3, b.md - minMd + 1)) : (minMd || structured ? 3 : 2));
   }
   // Lines before the first --- near the top are the subtitle area, not headings
   // (top area ends at the first ---, or else at the first real heading such as "## Must Memorize")
